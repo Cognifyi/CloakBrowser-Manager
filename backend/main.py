@@ -1031,3 +1031,26 @@ if FRONTEND_DIR.exists():
         if full_path and file_path.exists() and file_path.is_file():
             return FileResponse(file_path)
         return FileResponse(FRONTEND_DIR / "index.html")
+
+
+def main() -> None:
+    """Module entrypoint used by ``cloakbrowser-manager`` script."""
+    import uvicorn
+
+    port = int(os.environ.get("COBRA_PORT", "8080"))
+    host = os.environ.get("COBRA_HOST", "0.0.0.0")
+    log_level = os.environ.get("COBRA_LOG_LEVEL", "warning")
+
+    if VNC_ONLY:
+        logger.info("Starting CloakBrowser Manager in VNC-only mode (no Playwright Chrome)")
+
+    uvicorn.run(
+        "backend.main:app",
+        host=host,
+        port=port,
+        log_level=log_level,
+    )
+
+
+if __name__ == "__main__":
+    main()

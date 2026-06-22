@@ -12,11 +12,26 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from cloakbrowser import launch_persistent_context_async
-
 from .vnc_manager import VNCManager
 
 logger = logging.getLogger("cloakbrowser.manager.browser")
+
+# VNC-only mode: when enabled, BrowserManager only provides X11 + KasmVNC
+# infrastructure without launching a Playwright/CloakBrowser Chrome.
+# This is used by Cognitive Sandbox's cdp-image-viz where browser-use
+# launches its own Chrome on the X11 display.
+VNC_ONLY = os.environ.get("COBRA_VNC_ONLY", "0") == "1"
+
+# Lazy-load cloakbrowser to allow VNC-only mode without the dependency.
+_launch_persistent_context_async = None
+
+def _get_launch_fn():
+    """Lazily import launch_persistent_context_async from cloakbrowser."""
+    global _launch_persistent_context_async
+    if _launch_persistent_context_async is None:
+        from cloakbrowser import launch_persistent_context_async as _fn
+        _launch_persistent_context_async = _fn
+    return _launch_persistent_context_async
 
 
 def _normalize_proxy(raw: str) -> str:
@@ -201,6 +216,27 @@ class BrowserManager:
                 height=profile.get("screen_height", 1080),
             )
 
+            if VNC_ONLY:
+                # VNC-only mode: skip Playwright/CloakBrowser Chrome launch.
+                # The caller (e.g. browser-use in cdp-image-viz) will launch
+                # its own Chrome on this X11 display.
+                logger.info(
+                    "VNC-only mode: started VNC for profile %s on display :%d "
+                    "(ws_port=%d) — no Playwright Chrome launched",
+                    profile_id, display, ws_port,
+                )
+                running = RunningProfile(
+                    profile_id=profile_id,
+                    context=None,  # No Playwright context in VNC-only mode
+                    display=display,
+                    ws_port=ws_port,
+                    cdp_port=cdp_port,
+                )
+                async with self._lock:
+                    self.running[profile_id] = running
+                    self._launching.discard(profile_id)
+                return running
+
             # Build fingerprint args from profile settings
             extra_args = self._build_fingerprint_args(profile)
             extra_args += profile.get("launch_args") or []
@@ -214,7 +250,8 @@ class BrowserManager:
 
             # Launch CloakBrowser on that display
             # DISPLAY is passed via env kwarg to avoid process-wide os.environ mutation
-            context = await launch_persistent_context_async(
+            launch_fn = _get_launch_fn()
+            context = await launch_fn(
                 user_data_dir=profile["user_data_dir"],
                 headless=bool(profile.get("headless", False)),
                 proxy=proxy,
@@ -307,7 +344,8 @@ class BrowserManager:
         logger.info("Stopping profile %s", profile_id)
 
         try:
-            await running.context.close()
+            if running.context is not None:
+                await running.context.close()
         except Exception as exc:
             logger.warning("Error closing context for %s: %s", profile_id, exc)
 
