@@ -1036,6 +1036,7 @@ if FRONTEND_DIR.exists():
 def main() -> None:
     """Module entrypoint used by ``cloakbrowser-manager`` script."""
     import uvicorn
+    from backend.browser_manager import VNC_ONLY
 
     port = int(os.environ.get("COBRA_PORT", "8080"))
     host = os.environ.get("COBRA_HOST", "0.0.0.0")
