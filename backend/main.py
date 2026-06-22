@@ -25,7 +25,7 @@ import starlette.requests
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import database as db
-from .browser_manager import BrowserManager
+from .browser_manager import BrowserManager, VNC_ONLY
 from .models import (
     ClipboardRequest,
     LaunchResponse,
@@ -375,7 +375,7 @@ def _filter_rfb_client_messages(data: bytes) -> bytes:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
-    await browser_mgr.cleanup_stale()
+    await browser_mgr.cleanup_stale(preserve_running=VNC_ONLY)
     browser_mgr._auto_launch_task = asyncio.create_task(browser_mgr.auto_launch_all())
     logger.info("CloakBrowser Manager started")
     yield
@@ -1036,7 +1036,6 @@ if FRONTEND_DIR.exists():
 def main() -> None:
     """Module entrypoint used by ``cloakbrowser-manager`` script."""
     import uvicorn
-    from backend.browser_manager import VNC_ONLY
 
     port = int(os.environ.get("COBRA_PORT", "8080"))
     host = os.environ.get("COBRA_HOST", "0.0.0.0")

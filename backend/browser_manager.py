@@ -373,9 +373,9 @@ class BrowserManager:
 
         await self.vnc.cleanup_all()
 
-    async def cleanup_stale(self):
+    async def cleanup_stale(self, preserve_running: bool = False):
         """Kill orphan processes from previous container runs."""
-        await self.vnc.cleanup_stale()
+        await self.vnc.cleanup_stale(preserve_running=preserve_running)
 
     async def auto_launch_all(self):
         """Launch all profiles with auto_launch=True. Called on startup."""
