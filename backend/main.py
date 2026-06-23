@@ -25,7 +25,7 @@ import starlette.requests
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import database as db
-from .browser_manager import BrowserManager
+from .browser_manager import BrowserManager, VNC_ONLY
 from .models import (
     ClipboardRequest,
     LaunchResponse,
@@ -375,7 +375,7 @@ def _filter_rfb_client_messages(data: bytes) -> bytes:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
-    await browser_mgr.cleanup_stale()
+    await browser_mgr.cleanup_stale(preserve_running=VNC_ONLY)
     browser_mgr._auto_launch_task = asyncio.create_task(browser_mgr.auto_launch_all())
     logger.info("CloakBrowser Manager started")
     yield
@@ -672,6 +672,106 @@ async def get_clipboard(profile_id: str):
 
 
 # ── VNC WebSocket Proxy ──────────────────────────────────────────────────────
+
+
+@app.websocket("/vnc")
+async def vnc_proxy_direct(websocket: WebSocket):
+    """Direct VNC WebSocket proxy for VNC-only mode (no profile needed).
+
+    Proxies to the KasmVNC WebSocket on the default display (:0, port 8443).
+    Used when CBM runs in VNC-only mode alongside an externally-started Xvnc.
+    """
+    if not await _check_websocket_origin(websocket):
+        return
+
+    # In VNC-only mode, proxy to the default VNC WS port (display :0 → 8443)
+    vnc_ws_port = browser_mgr.vnc.get_ws_port(0) or 8443
+
+    requested = websocket.scope.get("subprotocols", [])
+    subprotocol = "binary" if "binary" in requested else None
+    await websocket.accept(subprotocol=subprotocol)
+
+    import websockets
+
+    vnc_url = f"ws://127.0.0.1:{vnc_ws_port}/websockify"
+
+    try:
+        async with websockets.connect(
+            vnc_url,
+            subprotocols=["binary"],
+            origin=f"http://127.0.0.1:{vnc_ws_port}",
+            max_size=None,
+            ping_interval=None,
+            ping_timeout=None,
+            compression=None,
+        ) as vnc_ws:
+            logger.info("VNC proxy (direct): connected to KasmVNC ws_port=%d", vnc_ws_port)
+
+            async def client_to_vnc():
+                count = 0
+                handshake = 0
+                dropped = 0
+                try:
+                    while True:
+                        msg = await websocket.receive()
+                        msg_type = msg.get("type", "")
+                        if msg_type == "websocket.disconnect":
+                            logger.info("VNC proxy [c->v]: client disconnect (code=%s) after %d msgs (%d dropped)", msg.get("code"), count, dropped)
+                            break
+                        if "bytes" in msg and msg["bytes"]:
+                            count += 1
+                            data = msg["bytes"]
+                            handshake += 1
+                            if handshake <= 3:
+                                await vnc_ws.send(data)
+                                continue
+                            filtered = _filter_rfb_client_messages(data)
+                            if filtered:
+                                if filtered[0] not in _RFB_MSG_SIZE:
+                                    dropped += 1
+                                    continue
+                                await vnc_ws.send(filtered)
+                            else:
+                                dropped += 1
+                        elif "text" in msg and msg["text"]:
+                            count += 1
+                            dropped += 1
+                except WebSocketDisconnect as exc:
+                    logger.info("VNC proxy [c->v]: WebSocketDisconnect code=%s after %d msgs", exc.code, count)
+                except Exception as exc:
+                    logger.warning("VNC proxy [c->v]: %s: %s", type(exc).__name__, exc)
+
+            async def vnc_to_client():
+                count = 0
+                try:
+                    async for msg in vnc_ws:
+                        count += 1
+                        if isinstance(msg, bytes) and len(msg) > 0:
+                            msg_type = msg[0]
+                            if msg_type == 180:
+                                text = _parse_kasmvnc_clipboard(msg)
+                                if text:
+                                    await websocket.send_bytes(_build_server_cut_text(text))
+                                continue
+                            await websocket.send_bytes(msg)
+                        elif isinstance(msg, bytes):
+                            await websocket.send_bytes(msg)
+                        else:
+                            await websocket.send_text(msg)
+                    logger.info("VNC proxy [v->c]: stream ended after %d msgs", count)
+                except WebSocketDisconnect as exc:
+                    logger.info("VNC proxy [v->c]: disconnect code=%s after %d msgs", exc.code, count)
+                except Exception as exc:
+                    logger.warning("VNC proxy [v->c]: %s: %s", type(exc).__name__, exc)
+
+            c2v = asyncio.create_task(client_to_vnc(), name="c2v-direct")
+            v2c = asyncio.create_task(vnc_to_client(), name="v2c-direct")
+            done, pending = await asyncio.wait([c2v, v2c], return_when=asyncio.FIRST_COMPLETED)
+            for t in pending:
+                t.cancel()
+            logger.info("VNC proxy (direct): finished tasks=%s", [t.get_name() for t in done])
+    except Exception as exc:
+        logger.warning("VNC proxy (direct): failed to connect to KasmVNC: %s", exc)
 
 
 @app.websocket("/api/profiles/{profile_id}/vnc")
@@ -1031,3 +1131,26 @@ if FRONTEND_DIR.exists():
         if full_path and file_path.exists() and file_path.is_file():
             return FileResponse(file_path)
         return FileResponse(FRONTEND_DIR / "index.html")
+
+
+def main() -> None:
+    """Module entrypoint used by ``cloakbrowser-manager`` script."""
+    import uvicorn
+
+    port = int(os.environ.get("COBRA_PORT", "8080"))
+    host = os.environ.get("COBRA_HOST", "0.0.0.0")
+    log_level = os.environ.get("COBRA_LOG_LEVEL", "warning")
+
+    if VNC_ONLY:
+        logger.info("Starting CloakBrowser Manager in VNC-only mode (no Playwright Chrome)")
+
+    uvicorn.run(
+        "backend.main:app",
+        host=host,
+        port=port,
+        log_level=log_level,
+    )
+
+
+if __name__ == "__main__":
+    main()

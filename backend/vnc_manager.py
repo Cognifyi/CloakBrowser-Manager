@@ -116,8 +116,30 @@ class VNCManager:
         for display in displays:
             await self.stop_vnc(display)
 
-    async def cleanup_stale(self):
-        """Kill orphan Xvnc processes from previous runs."""
+    async def cleanup_stale(self, preserve_running: bool = False):
+        """Kill orphan Xvnc processes from previous runs.
+
+        Args:
+            preserve_running: If True, do not kill Xvnc processes that are
+                already running (e.g. started by an external entrypoint in
+                VNC-only mode). Only clean up truly orphaned processes.
+        """
+        if preserve_running:
+            # Check if any Xvnc is already running; if so, adopt it instead
+            # of killing it.
+            try:
+                result = subprocess.run(
+                    ["pgrep", "-f", r"Xvnc :[0-9]"],
+                    capture_output=True,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    logger.info(
+                        "Xvnc already running (pid=%s); skipping stale cleanup",
+                        result.stdout.decode().strip().split("\n")[0],
+                    )
+                    return
+            except FileNotFoundError:
+                pass
         try:
             result = subprocess.run(
                 ["pkill", "-f", r"Xvnc :[0-9]"],
