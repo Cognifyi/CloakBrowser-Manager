@@ -27,6 +27,10 @@ VNC_ONLY = os.environ.get("COBRA_VNC_ONLY", "0") == "1"
 # the browser window appears on the VNC desktop that the user sees.
 VNC_HOST_DISPLAY = int(os.environ.get("COBRA_VNC_DISPLAY", "0")) if VNC_ONLY else None
 
+# KasmVNC WebSocket port on the host display (set by entrypoint.sh via
+# -websocketPort).  CBM's /vnc endpoint uses this to proxy VNC traffic.
+VNC_HOST_WS_PORT = int(os.environ.get("COBRA_VNC_WS_PORT", "8443")) if VNC_ONLY else None
+
 # Lazy-load cloakbrowser to allow VNC-only mode without the dependency.
 _launch_persistent_context_async = None
 
@@ -204,11 +208,14 @@ class BrowserManager:
             async with self.vnc._lock:
                 # Free the auto-allocated display
                 self.vnc._allocated.pop(display, None)
-                # Use host display
+                # Use host display and host KasmVNC WS port (8443)
                 display = VNC_HOST_DISPLAY
+                host_ws_port = VNC_HOST_WS_PORT or 8443
                 self.vnc._allocated[display] = VNCInstance(
-                    display=display, ws_port=ws_port,
+                    display=display, ws_port=host_ws_port,
                 )
+                # Use the host WS port for the RunningProfile too
+                ws_port = host_ws_port
 
         try:
             cdp_port = self._allocate_cdp_port()
