@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .vnc_manager import VNCManager
+from .vnc_manager import VNCInstance, VNCManager
 
 logger = logging.getLogger("cloakbrowser.manager.browser")
 
@@ -21,6 +21,11 @@ logger = logging.getLogger("cloakbrowser.manager.browser")
 # This is used by Cognitive Sandbox's cdp-image-viz where browser-use
 # launches its own Chrome on the X11 display.
 VNC_ONLY = os.environ.get("COBRA_VNC_ONLY", "0") == "1"
+
+# In VNC-only mode, reuse the host Xvnc display (:0) started by the
+# container entrypoint instead of allocating a new one.  This ensures
+# the browser window appears on the VNC desktop that the user sees.
+VNC_HOST_DISPLAY = int(os.environ.get("COBRA_VNC_DISPLAY", "0")) if VNC_ONLY else None
 
 # Lazy-load cloakbrowser to allow VNC-only mode without the dependency.
 _launch_persistent_context_async = None
@@ -190,6 +195,21 @@ class BrowserManager:
 
         display, ws_port = await self.vnc.allocate()
 
+        # In VNC-only mode with a host display, override the allocated display
+        # with the host's :0 (started by entrypoint.sh).  We still call
+        # allocate() to get a ws_port and track the instance, but we don't
+        # start a new Xvnc — the entrypoint already did.
+        if VNC_ONLY and VNC_HOST_DISPLAY is not None:
+            # Reuse host display instead of the allocated one
+            async with self.vnc._lock:
+                # Free the auto-allocated display
+                self.vnc._allocated.pop(display, None)
+                # Use host display
+                display = VNC_HOST_DISPLAY
+                self.vnc._allocated[display] = VNCInstance(
+                    display=display, ws_port=ws_port,
+                )
+
         try:
             cdp_port = self._allocate_cdp_port()
         except ValueError:
@@ -208,22 +228,24 @@ class BrowserManager:
         _init_profile_defaults(user_data_dir)
 
         try:
-            # Start KasmVNC on the allocated display
-            await self.vnc.start_vnc(
-                display,
-                ws_port,
-                width=profile.get("screen_width", 1920),
-                height=profile.get("screen_height", 1080),
-            )
+            # Start KasmVNC on the allocated display — unless we're reusing
+            # the host display (entrypoint.sh already started Xvnc on :0).
+            if not (VNC_ONLY and VNC_HOST_DISPLAY is not None):
+                await self.vnc.start_vnc(
+                    display,
+                    ws_port,
+                    width=profile.get("screen_width", 1920),
+                    height=profile.get("screen_height", 1080),
+                )
 
             if VNC_ONLY:
                 # VNC-only mode: skip Playwright/CloakBrowser Chrome launch.
                 # The caller (e.g. browser-use in cdp-image-viz) will launch
                 # its own Chrome on this X11 display.
                 logger.info(
-                    "VNC-only mode: started VNC for profile %s on display :%d "
-                    "(ws_port=%d) — no Playwright Chrome launched",
-                    profile_id, display, ws_port,
+                    "VNC-only mode: using display :%d (ws_port=%d) for profile %s "
+                    "— no Playwright Chrome launched",
+                    display, ws_port, profile_id,
                 )
                 running = RunningProfile(
                     profile_id=profile_id,
