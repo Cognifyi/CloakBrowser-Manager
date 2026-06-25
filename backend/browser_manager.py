@@ -239,17 +239,42 @@ class BrowserManager:
                 )
 
             if VNC_ONLY:
-                # VNC-only mode: skip Playwright/CloakBrowser Chrome launch.
-                # The caller (e.g. browser-use in cdp-image-viz) will launch
-                # its own Chrome on this X11 display.
+                # VNC-only mode: launch Chrome on the host X11 display (:0)
+                # so the browser window is visible on the VNC desktop.
+                # We still use CloakBrowser for fingerprinting, but with
+                # the host display instead of a per-profile Xvnc.
                 logger.info(
-                    "VNC-only mode: using display :%d (ws_port=%d) for profile %s "
-                    "— no Playwright Chrome launched",
+                    "VNC-only mode: launching Chrome on display :%d (ws_port=%d) for profile %s",
                     display, ws_port, profile_id,
+                )
+                extra_args = self._build_fingerprint_args(profile)
+                extra_args += profile.get("launch_args") or []
+                extra_args.append(f"--remote-debugging-port={cdp_port}")
+
+                raw_proxy = profile.get("proxy") or None
+                proxy = _normalize_proxy(raw_proxy) if raw_proxy else None
+                if proxy:
+                    _validate_proxy(proxy)
+
+                launch_fn = _get_launch_fn()
+                context = await launch_fn(
+                    user_data_dir=profile["user_data_dir"],
+                    headless=bool(profile.get("headless", False)),
+                    proxy=proxy,
+                    args=extra_args,
+                    timezone=profile.get("timezone") or None,
+                    locale=profile.get("locale") or None,
+                    humanize=bool(profile.get("humanize", False)),
+                    env={**os.environ, "DISPLAY": f":{display}"},
+                )
+
+                logger.info(
+                    "Launched profile %s on display :%d (ws_port=%d, cdp_port=%d)",
+                    profile_id, display, ws_port, cdp_port,
                 )
                 running = RunningProfile(
                     profile_id=profile_id,
-                    context=None,  # No Playwright context in VNC-only mode
+                    context=context,
                     display=display,
                     ws_port=ws_port,
                     cdp_port=cdp_port,
